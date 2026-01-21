@@ -115,7 +115,6 @@ function createPopupHtml(presets) {
             </div>
             
             <div class="pm-actions">
-                <button id="pm-btn-copy" disabled>📋 복사</button>
                 <button id="pm-btn-move" disabled>✂️ 이동</button>
             </div>
         </div>
@@ -152,14 +151,12 @@ function renderPromptsList(container, listId, prompts, selectedIndex, onSelect) 
 }
 
 function updateButtons(container) {
-    const copyBtn = container.querySelector('#pm-btn-copy');
     const moveBtn = container.querySelector('#pm-btn-move');
     
-    const canCopy = sourcePresetName && targetPresetName && 
-                    selectedSourcePromptIndex >= 0 && selectedTargetPromptIndex >= 0;
-    const canMove = canCopy && sourcePresetName !== targetPresetName;
+    const canMove = sourcePresetName && targetPresetName && 
+                    selectedSourcePromptIndex >= 0 && selectedTargetPromptIndex >= 0 &&
+                    sourcePresetName !== targetPresetName;
     
-    if (copyBtn) copyBtn.disabled = !canCopy;
     if (moveBtn) moveBtn.disabled = !canMove;
 }
 
@@ -307,7 +304,6 @@ async function openPromptMoverPopup() {
             insertMode = e.target.value;
         });
         
-        container.querySelector('#pm-btn-copy')?.addEventListener('click', () => performOperation(container, false));
         container.querySelector('#pm-btn-move')?.addEventListener('click', () => performOperation(container, true));
         
         await callGenericPopup(container, POPUP_TYPE.TEXT, '', { okButton: '닫기', cancelButton: false, wide: true });
