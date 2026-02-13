@@ -79,7 +79,7 @@ function createPopupHtml(presets) {
     return `
         <div id="prompt-mover-container">
             <div class="pm-section">
-                <div class="pm-section-title">📤 소스 프리셋 (Source)</div>
+                <div class="pm-section-title">📤 출발 프리셋</div>
                 <div class="pm-row">
                     <label>프리셋:</label>
                     <select id="pm-source-preset">
@@ -93,7 +93,7 @@ function createPopupHtml(presets) {
             </div>
             
             <div class="pm-section">
-                <div class="pm-section-title">📥 대상 프리셋 (Target) - 삽입할 위치를 선택</div>
+                <div class="pm-section-title">📥 도착 프리셋 - 삽입할 위치를 선택</div>
                 <div class="pm-row">
                     <label>프리셋:</label>
                     <select id="pm-target-preset">
