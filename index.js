@@ -1,7 +1,9 @@
 // Prompt Mover Extension for SillyTavern
 // Allows moving/copying prompts between OpenAI presets
+// Uses prompt_order (usage order) for display and insertion
 
 const extensionName = 'prompt-mover';
+const GLOBAL_DUMMY_ID = 100001;
 
 // Dynamic imports for third-party compatibility
 let getRequestHeaders, callGenericPopup, POPUP_TYPE, openai_setting_names, openai_settings;
@@ -25,10 +27,11 @@ async function initImports() {
 
 let sourcePresetName = '';
 let targetPresetName = '';
-let sourcePrompts = [];
-let targetPrompts = [];
+// These now hold ordered prompt data: [{identifier, enabled, prompt (definition)}]
+let sourceOrderedPrompts = [];
+let targetOrderedPrompts = [];
 let selectedSourcePromptIndex = -1;
-let insertPosition = -1; // The exact index to insert at
+let insertPosition = -1; // The exact index to insert at in prompt_order
 
 /**
  * Load all OpenAI presets
@@ -49,8 +52,45 @@ async function loadAllPresets() {
     return presets;
 }
 
-function getPromptsFromPreset(preset) {
-    return preset?.prompts || [];
+/**
+ * Get the prompt_order for the global dummy character from a preset.
+ * @param {object} preset
+ * @returns {{identifier: string, enabled: boolean}[]}
+ */
+function getPromptOrder(preset) {
+    if (!preset?.prompt_order) return [];
+    const entry = preset.prompt_order.find(o => String(o.character_id) === String(GLOBAL_DUMMY_ID));
+    return entry?.order || [];
+}
+
+/**
+ * Find a prompt definition by identifier in a preset's prompts array.
+ * @param {object} preset
+ * @param {string} identifier
+ * @returns {object|null}
+ */
+function findPromptDef(preset, identifier) {
+    return preset?.prompts?.find(p => p.identifier === identifier) || null;
+}
+
+/**
+ * Build ordered prompt list from prompt_order, resolving each to its definition.
+ * Each entry: { identifier, enabled, prompt (full definition or stub) }
+ * @param {object} preset
+ * @returns {Array}
+ */
+function getOrderedPrompts(preset) {
+    const order = getPromptOrder(preset);
+    const prompts = preset?.prompts || [];
+    
+    return order.map(entry => {
+        const def = prompts.find(p => p.identifier === entry.identifier);
+        return {
+            identifier: entry.identifier,
+            enabled: entry.enabled,
+            prompt: def || { identifier: entry.identifier, name: entry.identifier },
+        };
+    });
 }
 
 async function savePreset(name, preset) {
@@ -79,7 +119,7 @@ function createPopupHtml(presets) {
     return `
         <div id="prompt-mover-container">
             <div class="pm-section">
-                <div class="pm-section-title">📤 출발 프리셋</div>
+                <div class="pm-section-title">📤 출발 프리셋 (프롬프트 사용 순서)</div>
                 <div class="pm-row">
                     <label>프리셋:</label>
                     <select id="pm-source-preset">
@@ -113,22 +153,25 @@ function createPopupHtml(presets) {
     `;
 }
 
-function renderSourceList(container, prompts, selectedIndex, onSelect) {
+function renderSourceList(container, orderedPrompts, selectedIndex, onSelect) {
     const listElement = container.querySelector('#pm-source-prompts');
     if (!listElement) return;
     
-    if (!prompts || prompts.length === 0) {
+    if (!orderedPrompts || orderedPrompts.length === 0) {
         listElement.innerHTML = '<div style="padding: 10px; text-align: center;">프롬프트 없음</div>';
         return;
     }
     
-    listElement.innerHTML = prompts.map((prompt, index) => {
+    listElement.innerHTML = orderedPrompts.map((entry, index) => {
         const isSelected = index === selectedIndex;
+        const prompt = entry.prompt;
         const name = prompt.name || prompt.identifier || 'Unnamed';
-        const identifier = prompt.identifier || '';
+        const identifier = entry.identifier || '';
         const markerIcon = prompt.marker ? '📍 ' : '';
+        const enabledIcon = entry.enabled ? '✅' : '⬜';
         return `
-            <div class="pm-prompt-item ${isSelected ? 'selected' : ''}" data-index="${index}">
+            <div class="pm-prompt-item ${isSelected ? 'selected' : ''} ${!entry.enabled ? 'pm-disabled' : ''}" data-index="${index}">
+                <span class="pm-prompt-toggle">${enabledIcon}</span>
                 <span class="pm-prompt-index">#${index + 1}</span>
                 <span class="pm-prompt-name">${markerIcon}${name}</span>
                 <span class="pm-prompt-identifier">[${identifier}]</span>
@@ -141,11 +184,11 @@ function renderSourceList(container, prompts, selectedIndex, onSelect) {
     });
 }
 
-function renderTargetListWithSlots(container, prompts, selectedSlot, onSelectSlot) {
+function renderTargetListWithSlots(container, orderedPrompts, selectedSlot, onSelectSlot) {
     const listElement = container.querySelector('#pm-target-prompts');
     if (!listElement) return;
     
-    if (!prompts || prompts.length === 0) {
+    if (!orderedPrompts || orderedPrompts.length === 0) {
         listElement.innerHTML = `
             <div class="pm-insert-slot ${selectedSlot === 0 ? 'selected' : ''}" data-slot="0">
                 <span class="pm-slot-icon">➕</span> 여기에 삽입
@@ -162,13 +205,16 @@ function renderTargetListWithSlots(container, prompts, selectedSlot, onSelectSlo
         <span class="pm-slot-icon">➕</span> 맨 위에 삽입
     </div>`;
     
-    prompts.forEach((prompt, index) => {
+    orderedPrompts.forEach((entry, index) => {
+        const prompt = entry.prompt;
         const name = prompt.name || prompt.identifier || 'Unnamed';
-        const identifier = prompt.identifier || '';
+        const identifier = entry.identifier || '';
         const markerIcon = prompt.marker ? '📍 ' : '';
+        const enabledIcon = entry.enabled ? '✅' : '⬜';
         
         html += `
-            <div class="pm-prompt-item pm-target-item" data-index="${index}">
+            <div class="pm-prompt-item pm-target-item ${!entry.enabled ? 'pm-disabled' : ''}" data-index="${index}">
+                <span class="pm-prompt-toggle">${enabledIcon}</span>
                 <span class="pm-prompt-index">#${index + 1}</span>
                 <span class="pm-prompt-name">${markerIcon}${name}</span>
                 <span class="pm-prompt-identifier">[${identifier}]</span>
@@ -205,50 +251,76 @@ async function performOperation(container, removeFromSource) {
         return;
     }
     
-    const sourceIndex = openai_setting_names[sourcePresetName];
-    const targetIndex = openai_setting_names[targetPresetName];
+    const sourceSettingIndex = openai_setting_names[sourcePresetName];
+    const targetSettingIndex = openai_setting_names[targetPresetName];
     
-    if (sourceIndex === undefined || targetIndex === undefined) {
+    if (sourceSettingIndex === undefined || targetSettingIndex === undefined) {
         toastr.error('프리셋을 찾을 수 없습니다');
         return;
     }
     
-    const promptToCopy = JSON.parse(JSON.stringify(sourcePrompts[selectedSourcePromptIndex]));
-    
-    // Handle duplicate identifiers
-    const existingIds = targetPrompts.map(p => p.identifier);
-    if (existingIds.includes(promptToCopy.identifier)) {
-        let counter = 1;
-        const baseName = promptToCopy.identifier.replace(/_\d+$/, '');
-        while (existingIds.includes(`${baseName}_${counter}`)) counter++;
-        promptToCopy.identifier = `${baseName}_${counter}`;
-        promptToCopy.name = `${promptToCopy.name} (${counter})`;
+    const selectedEntry = sourceOrderedPrompts[selectedSourcePromptIndex];
+    if (!selectedEntry) {
+        toastr.error('선택한 프롬프트를 찾을 수 없습니다');
+        return;
     }
     
-    const insertPos = insertPosition;
+    // Deep copy the prompt definition to insert
+    const promptDef = JSON.parse(JSON.stringify(selectedEntry.prompt));
     
-    // Update target preset
-    const targetPreset = JSON.parse(JSON.stringify(openai_settings[targetIndex]));
+    // Handle duplicate identifiers in target
+    const targetPreset = JSON.parse(JSON.stringify(openai_settings[targetSettingIndex]));
     targetPreset.prompts = targetPreset.prompts || [];
-    targetPreset.prompts.splice(insertPos, 0, promptToCopy);
+    targetPreset.prompt_order = targetPreset.prompt_order || [];
     
-    if (targetPreset.prompt_order) {
-        for (const order of targetPreset.prompt_order) {
-            if (order.order) {
-                order.order.splice(insertPos, 0, { identifier: promptToCopy.identifier, enabled: true });
-            }
+    const existingIds = targetPreset.prompts.map(p => p.identifier);
+    let newIdentifier = promptDef.identifier;
+    if (existingIds.includes(newIdentifier)) {
+        let counter = 1;
+        const baseName = newIdentifier.replace(/_\d+$/, '');
+        while (existingIds.includes(`${baseName}_${counter}`)) counter++;
+        newIdentifier = `${baseName}_${counter}`;
+        promptDef.identifier = newIdentifier;
+        promptDef.name = `${promptDef.name || selectedEntry.identifier} (${counter})`;
+    }
+    
+    // Add prompt definition to target's prompts array (at the end)
+    targetPreset.prompts.push(promptDef);
+    
+    // Insert into prompt_order at the selected position
+    const targetOrderEntry = targetPreset.prompt_order.find(o => String(o.character_id) === String(GLOBAL_DUMMY_ID));
+    if (targetOrderEntry && targetOrderEntry.order) {
+        targetOrderEntry.order.splice(insertPosition, 0, { identifier: newIdentifier, enabled: true });
+    } else {
+        // If no global order entry exists, create one
+        targetPreset.prompt_order.push({
+            character_id: GLOBAL_DUMMY_ID,
+            order: [{ identifier: newIdentifier, enabled: true }],
+        });
+    }
+    
+    // Also insert into any character-specific prompt_orders
+    for (const orderEntry of targetPreset.prompt_order) {
+        if (String(orderEntry.character_id) !== String(GLOBAL_DUMMY_ID) && orderEntry.order) {
+            orderEntry.order.push({ identifier: newIdentifier, enabled: true });
         }
     }
     
     try {
         await savePreset(targetPresetName, targetPreset);
-        openai_settings[targetIndex] = targetPreset;
+        openai_settings[targetSettingIndex] = targetPreset;
         
         if (removeFromSource && sourcePresetName !== targetPresetName) {
-            const sourcePreset = JSON.parse(JSON.stringify(openai_settings[sourceIndex]));
-            const removedId = sourcePrompts[selectedSourcePromptIndex].identifier;
-            sourcePreset.prompts.splice(selectedSourcePromptIndex, 1);
+            const sourcePreset = JSON.parse(JSON.stringify(openai_settings[sourceSettingIndex]));
+            const removedId = selectedEntry.identifier;
             
+            // Remove from source's prompts array
+            const promptIdx = sourcePreset.prompts.findIndex(p => p.identifier === removedId);
+            if (promptIdx >= 0) {
+                sourcePreset.prompts.splice(promptIdx, 1);
+            }
+            
+            // Remove from all prompt_order entries
             if (sourcePreset.prompt_order) {
                 for (const order of sourcePreset.prompt_order) {
                     if (order.order) {
@@ -258,30 +330,30 @@ async function performOperation(container, removeFromSource) {
             }
             
             await savePreset(sourcePresetName, sourcePreset);
-            openai_settings[sourceIndex] = sourcePreset;
+            openai_settings[sourceSettingIndex] = sourcePreset;
         }
         
         toastr.success(removeFromSource ? '이동 완료' : '복사 완료');
         
         // Refresh lists
-        sourcePrompts = getPromptsFromPreset(openai_settings[sourceIndex]);
-        targetPrompts = getPromptsFromPreset(openai_settings[targetIndex]);
+        sourceOrderedPrompts = getOrderedPrompts(openai_settings[sourceSettingIndex]);
+        targetOrderedPrompts = getOrderedPrompts(openai_settings[targetSettingIndex]);
         selectedSourcePromptIndex = -1;
         insertPosition = -1;
         
         const srcHandler = idx => {
             selectedSourcePromptIndex = idx;
-            renderSourceList(container, sourcePrompts, idx, srcHandler);
+            renderSourceList(container, sourceOrderedPrompts, idx, srcHandler);
             updateButtons(container);
         };
         const slotHandler = slot => {
             insertPosition = slot;
-            renderTargetListWithSlots(container, targetPrompts, slot, slotHandler);
+            renderTargetListWithSlots(container, targetOrderedPrompts, slot, slotHandler);
             updateButtons(container);
         };
         
-        renderSourceList(container, sourcePrompts, -1, srcHandler);
-        renderTargetListWithSlots(container, targetPrompts, -1, slotHandler);
+        renderSourceList(container, sourceOrderedPrompts, -1, srcHandler);
+        renderTargetListWithSlots(container, targetOrderedPrompts, -1, slotHandler);
         updateButtons(container);
         
     } catch (error) {
@@ -302,8 +374,8 @@ async function openPromptMoverPopup() {
         // Reset state
         sourcePresetName = '';
         targetPresetName = '';
-        sourcePrompts = [];
-        targetPrompts = [];
+        sourceOrderedPrompts = [];
+        targetOrderedPrompts = [];
         selectedSourcePromptIndex = -1;
         insertPosition = -1;
         
@@ -312,29 +384,29 @@ async function openPromptMoverPopup() {
         
         const srcHandler = idx => {
             selectedSourcePromptIndex = idx;
-            renderSourceList(container, sourcePrompts, idx, srcHandler);
+            renderSourceList(container, sourceOrderedPrompts, idx, srcHandler);
             updateButtons(container);
         };
         
         const slotHandler = slot => {
             insertPosition = slot;
-            renderTargetListWithSlots(container, targetPrompts, slot, slotHandler);
+            renderTargetListWithSlots(container, targetOrderedPrompts, slot, slotHandler);
             updateButtons(container);
         };
         
         container.querySelector('#pm-source-preset')?.addEventListener('change', e => {
             sourcePresetName = e.target.value;
             selectedSourcePromptIndex = -1;
-            sourcePrompts = sourcePresetName ? getPromptsFromPreset(openai_settings[openai_setting_names[sourcePresetName]]) : [];
-            renderSourceList(container, sourcePrompts, -1, srcHandler);
+            sourceOrderedPrompts = sourcePresetName ? getOrderedPrompts(openai_settings[openai_setting_names[sourcePresetName]]) : [];
+            renderSourceList(container, sourceOrderedPrompts, -1, srcHandler);
             updateButtons(container);
         });
         
         container.querySelector('#pm-target-preset')?.addEventListener('change', e => {
             targetPresetName = e.target.value;
             insertPosition = -1;
-            targetPrompts = targetPresetName ? getPromptsFromPreset(openai_settings[openai_setting_names[targetPresetName]]) : [];
-            renderTargetListWithSlots(container, targetPrompts, -1, slotHandler);
+            targetOrderedPrompts = targetPresetName ? getOrderedPrompts(openai_settings[openai_setting_names[targetPresetName]]) : [];
+            renderTargetListWithSlots(container, targetOrderedPrompts, -1, slotHandler);
             updateButtons(container);
         });
         
